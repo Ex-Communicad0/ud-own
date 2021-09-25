@@ -6,30 +6,28 @@ import re
 import subprocess
 import sys
 import time
-from html.parser import HTMLParser as compat_HTMLParser
-
 import cloudscraper
 import m3u8
 import requests
 import yt_dlp
+from html.parser import HTMLParser as compat_HTMLParser
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as conn_error
 from tqdm import tqdm
-
 from sanitize import sanitize, slugify, SLUG_OK
 from utils import extract_kid
 from vtt_to_srt import convert
+from _version import __version__
 
 home_dir = os.getcwd()
-download_dir = os.path.join(os.getcwd(), "/content/drive/MyDrive/Learning/test")
-working_dir = os.path.join(os.getcwd(), "working_dir")
+download_dir = os.path.join(os.getcwd(), "out_dir")
 keyfile_path = os.path.join(os.getcwd(), "keyfile.json")
 retry = 3
 downloader = None
 HEADERS = {
     "Origin": "www.udemy.com",
     "User-Agent":
-    "Mozilla/5.0 (Windows NT 6.3; Win64; x64; rv:85.0) Gecko/20100101 Firefox/85.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
     "Accept": "*/*",
     "Accept-Encoding": None,
 }
@@ -43,15 +41,15 @@ COLLECTION_URL = "https://{portal_name}.udemy.com/api-2.0/users/me/subscribed-co
 
 
 def _clean(text):
-    ok = re.compile(r'[^\\/:*?"<>|]')
+    ok = re.compile(r'[^\\/:*?!"<>|]')
     text = "".join(x if ok.match(x) else "_" for x in text)
     text = re.sub(r"\.+$", "", text.strip())
     return text
 
 
 def _sanitize(self, unsafetext):
-    text = sanitize(
-        slugify(unsafetext, lower=False, spaces=True, ok=SLUG_OK + "().[]"))
+    text = _clean(sanitize(
+        slugify(unsafetext, lower=False, spaces=True, ok=SLUG_OK + "().[]")))
     return text
 
 
@@ -604,11 +602,14 @@ class Session(object):
             access_token)
 
     def _get(self, url):
-        session = self._session.get(url, headers=self._headers)
-        if session.ok or session.status_code in [502, 503]:
-            return session
-        if not session.ok:
-            raise Exception(f"{session.status_code} {session.reason}")
+        for i in range(10):
+            session = self._session.get(url, headers=self._headers)
+            if session.ok or session.status_code in [502, 503]:
+                return session
+            if not session.ok:
+                print('Failed request '+url)
+                print(f"{session.status_code} {session.reason}, retrying (attempt {i} )...")
+                time.sleep(0.8)
 
     def _post(self, url, data, redirect=True):
         session = self._session.post(url,
@@ -776,9 +777,6 @@ class UdemyAuth(object):
             self._session._set_auth_headers()
             return None, None
 
-
-if not os.path.exists(working_dir):
-    os.makedirs(working_dir)
 
 if not os.path.exists(download_dir):
     os.makedirs(download_dir)
@@ -1032,22 +1030,17 @@ def process_lecture(lecture, lecture_path, lecture_file_name, quality, access_to
 
     if is_encrypted:
         if len(lecture_sources) > 0:
-            if not os.path.isfile(lecture_path):
-                source = lecture_sources[-1]  # last index is the best quality
-                if isinstance(quality, int):
-                    source = min(
-                        lecture_sources,
-                        key=lambda x: abs(int(x.get("height")) - quality))
-                print(f"      > Lecture '%s' has DRM, attempting to download" %
-                      lecture_title)
-                handle_segments(source.get("download_url"),
-                                source.get(
-                                    "format_id"), lecture_title, lecture_path, lecture_file_name,
-                                concurrent_connections, chapter_dir)
-            else:
-                print(
-                    "      > Lecture '%s' is already downloaded, skipping..." %
-                    lecture_title)
+            source = lecture_sources[-1]  # last index is the best quality
+            if isinstance(quality, int):
+                source = min(
+                    lecture_sources,
+                    key=lambda x: abs(int(x.get("height")) - quality))
+            print(f"      > Lecture '%s' has DRM, attempting to download" %
+                  lecture_title)
+            handle_segments(source.get("download_url"),
+                            source.get(
+                                "format_id"), lecture_title, lecture_path, lecture_file_name,
+                            concurrent_connections, chapter_dir)
         else:
             print(f"      > Lecture '%s' is missing media links" %
                   lecture_title)
@@ -1081,8 +1074,8 @@ def process_lecture(lecture, lecture_path, lecture_file_name, quality, access_to
                             f"{concurrent_connections}", "--downloader",
                             "aria2c", "-o", f"{temp_filepath}", f"{url}"
                         ]).wait()
-                        if retVal:
-                            os.rename(temp_filepath, lecture_path)
+                        if ret_code == 0:
+                            # os.rename(temp_filepath, lecture_path)
                             print("      > HLS Download success")
                     else:
                         download_aria(url, chapter_dir, lecture_title + ".mp4")
@@ -1121,31 +1114,44 @@ def parse_new(_udemy, quality, skip_lectures, dl_assets, dl_captions,
         for lecture in chapter.get("lectures"):
             lecture_title = lecture.get("lecture_title")
             lecture_index = lecture.get("lecture_index")
+            lecture_extension = lecture.get("extension")
+            extension = "mp4"  # video lectures dont have an extension property, so we assume its mp4
+            if lecture_extension != None:
+                # if the lecture extension property isnt none, set the extension to the lecture extension
+                extension = lecture_extension
+            lecture_file_name = sanitize(lecture_title + "." + extension)
+            lecture_path = os.path.join(
+                chapter_dir,
+                lecture_file_name)
 
-            extension = lecture.get("extension")
             print(
                 f"  > Processing lecture {lecture_index} of {total_lectures}")
             if not skip_lectures:
-                if extension == "html":
-                    html_content = lecture.get("html_content").encode(
-                        "ascii", "ignore").decode("utf8")
-                    lecture_path = os.path.join(
-                        chapter_dir, "{}.html".format(sanitize(lecture_title)))
-                    try:
-                        with open(lecture_path, 'w') as f:
-                            f.write(html_content)
-                            f.close()
-                    except Exception as e:
-                        print("    > Failed to write html file: ", e)
-                        continue
+                print(lecture_file_name)
+                # Check if the lecture is already downloaded
+                if os.path.isfile(lecture_path):
+                    print(
+                        "      > Lecture '%s' is already downloaded, skipping..." %
+                        lecture_title)
+                    continue
                 else:
-                    lecture_file_name = sanitize(lecture_title + ".mp4")
-                    lecture_path = os.path.join(
-                        chapter_dir,
-                        lecture_file_name)
-                    process_lecture(lecture, lecture_path, lecture_file_name,
-                                    quality, access_token,
-                                    concurrent_connections, chapter_dir)
+                    # Check if the file is an html file
+                    if extension == "html":
+                        html_content = lecture.get("html_content").encode(
+                            "ascii", "ignore").decode("utf8")
+                        lecture_path = os.path.join(
+                            chapter_dir, "{}.html".format(sanitize(lecture_title)))
+                        try:
+                            with open(lecture_path, 'w') as f:
+                                f.write(html_content)
+                                f.close()
+                        except Exception as e:
+                            print("    > Failed to write html file: ", e)
+                            continue
+                    else:
+                        process_lecture(lecture, lecture_path, lecture_file_name,
+                                        quality, access_token,
+                                        concurrent_connections, chapter_dir)
 
             if dl_assets:
                 assets = lecture.get("assets")
@@ -1218,7 +1224,7 @@ def parse_new(_udemy, quality, skip_lectures, dl_assets, dl_captions,
                                         keep_vtt)
 
 
-def course_info(course_data):
+def _print_course_info(course_data):
     print("\n\n\n\n")
     course_title = course_data.get("title")
     chapter_count = course_data.get("total_chapters")
@@ -1372,6 +1378,8 @@ if __name__ == "__main__":
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument("-v", "--version", action="version",
+                        version='You are running version {version}'.format(version=__version__))
 
     dl_assets = False
     skip_lectures = False
@@ -1482,7 +1490,7 @@ if __name__ == "__main__":
         _udemy = json.loads(
             open(os.path.join(os.getcwd(), "saved", "_udemy.json")).read())
         if args.info:
-            course_info(_udemy)
+            _print_course_info(_udemy)
         else:
             parse_new(_udemy, quality, skip_lectures, dl_assets, dl_captions,
                       caption_locale, keep_vtt, access_token,
@@ -1513,7 +1521,7 @@ if __name__ == "__main__":
                     lecture_counter = 0
                     lectures = []
                     chapter_index = entry.get("object_index")
-                    chapter_title = "{0:02d} ".format(chapter_index) + _clean(
+                    chapter_title = "{0:02d} - ".format(chapter_index) + _clean(
                         entry.get("title"))
 
                     if chapter_title not in _udemy["chapters"]:
@@ -1530,7 +1538,7 @@ if __name__ == "__main__":
                     if len(_udemy["chapters"]) == 0:
                         lectures = []
                         chapter_index = entry.get("object_index")
-                        chapter_title = "{0:02d} ".format(
+                        chapter_title = "{0:02d} - ".format(
                             chapter_index) + _clean(entry.get("title"))
                         if chapter_title not in _udemy["chapters"]:
                             _udemy["chapters"].append({
@@ -1687,7 +1695,7 @@ if __name__ == "__main__":
                     if len(_udemy["chapters"]) == 0:
                         lectures = []
                         chapter_index = entry.get("object_index")
-                        chapter_title = "{0:02d} ".format(
+                        chapter_title = "{0:02d} - ".format(
                             chapter_index) + _clean(entry.get("title"))
                         if chapter_title not in _udemy["chapters"]:
                             lecture_counter = 0
@@ -1717,7 +1725,7 @@ if __name__ == "__main__":
             print("Saved parsed data to json")
 
         if args.info:
-            course_info(_udemy)
+            _print_course_info(_udemy)
         else:
             parse_new(_udemy, quality, skip_lectures, dl_assets, dl_captions,
                       caption_locale, keep_vtt, access_token,
