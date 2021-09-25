@@ -20,7 +20,7 @@ from vtt_to_srt import convert
 from _version import __version__
 
 home_dir = os.getcwd()
-download_dir = os.path.join(os.getcwd(), "/content/drive/MyDrive/Learning/test")
+download_dir = os.path.join(os.getcwd(), "/content/drive/Shareddrives/UDL/UDEMY-DL")
 keyfile_path = os.path.join(os.getcwd(), "keyfile.json")
 retry = 3
 downloader = None
